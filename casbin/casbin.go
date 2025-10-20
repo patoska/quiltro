@@ -15,7 +15,7 @@ func Init(db *gorm.DB) {
 		log.Fatalf("failed to create casbin adapter: %v", err)
 	}
 
-	e, err := casbin.NewEnforcer("config/casbin_model.conf", adapter)
+	e, err := casbin.NewEnforcer(os.Getenv("CASBIN_CONF_PATH"), adapter)
 	if err != nil {
 		log.Fatalf("failed to create casbin enforcer: %v", err)
 	}
