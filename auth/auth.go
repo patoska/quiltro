@@ -36,7 +36,6 @@ func Authorize(obj string, act string) gin.HandlerFunc {
 			c.AbortWithStatusJSON(403, "forbidden")
 		}
 
-		// casbin enforces policy
 		ok, err := casbin.Enforce(fmt.Sprintf("%d", userID), obj, act)
 		if err != nil {
 			log.Println(err)
