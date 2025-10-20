@@ -1,6 +1,7 @@
 package casbin
 
 import (
+	"os"
 	"log"
 	"gorm.io/gorm"
 	gormadapter "github.com/casbin/gorm-adapter/v3"
