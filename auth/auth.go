@@ -4,8 +4,8 @@ import (
 	"log"
 	"fmt"
 	"strings"
-	"quiltro/token"
-	"quiltro/casbin"
+	"github.com/patoska/quiltro/token"
+	"github.com/patoska/quiltro/casbin"
 	"github.com/gin-gonic/gin"
 )
 
