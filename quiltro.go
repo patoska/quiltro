@@ -2,9 +2,9 @@ package quiltro
 
 import (
 	"gorm.io/gorm"
-	"quiltro/casbin"
-	"quiltro/auth"
-	"quiltro/token"
+	"github.com/patoska/quiltro/casbin"
+	"github.com/patoska/quiltro/auth"
+	"github.com/patoska/quiltro/token"
 	"github.com/gin-gonic/gin"
 )
 
