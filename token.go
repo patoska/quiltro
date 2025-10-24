@@ -1,4 +1,4 @@
-package token
+package quiltro
 
 import (
 	"os"
@@ -9,9 +9,9 @@ import (
 
 var jwtKey = []byte(os.Getenv("JWT_SECRET"))
 
-func GenerateJWT(userID uint) (string, error) {
+func GenerateJWT(id uint) (string, error) {
 	claims := jwt.MapClaims{
-		"user_id": userID,
+		"id":      id,
 		"exp":     time.Now().Add(24 * time.Hour).Unix(),
 		"iat":     time.Now().Unix(),
 	}
@@ -19,7 +19,7 @@ func GenerateJWT(userID uint) (string, error) {
 	return token.SignedString(jwtKey)
 }
 
-func ParseJWT(tokenStr string) (uint, error) {
+func parseJWT(tokenStr string) (uint, error) {
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		return jwtKey, nil
 	})
@@ -32,6 +32,6 @@ func ParseJWT(tokenStr string) (uint, error) {
 		return 0, err
 	}
 
-	userID := uint(claims["user_id"].(float64))
-	return userID, nil
+	id := uint(claims["id"].(float64))
+	return id, nil
 }

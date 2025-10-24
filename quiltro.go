@@ -2,32 +2,22 @@ package quiltro
 
 import (
 	"gorm.io/gorm"
-	"github.com/patoska/quiltro/casbin"
-	"github.com/patoska/quiltro/auth"
-	"github.com/patoska/quiltro/token"
-	"github.com/gin-gonic/gin"
+	"reflect"
+	"strings"
 )
 
-func initCasbin(db *gorm.DB) {
-	casbin.Init(db)
-}
+var (
+	db *gorm.DB
+	subjectId string
+)
 
-func AddPolicy(sub string, obj string, act string) error {
-	return casbin.AddPolicy(sub, obj, act)
-}
+func Init(gormDb *gorm.DB, s interface{}) {
+	db = gormDb
+	initCasbin()
+	dataType := reflect.TypeOf(s)
 
-func RemovePolicy(sub string, obj string, act string) error {
-	return casbin.RemovePolicy(sub, obj, act)
-}
-
-func Authenticate() {
-	auth.Authenticate()
-}
-
-func Authorize(obj string, act string) gin.HandlerFunc {
-	return auth.Authorize(obj, act)
-}
-
-func GenerateJWT(userID uint) (string, error) {
-	return token.GenerateJWT(userID)
+	if dataType.Kind() == reflect.Struct {
+		structName := dataType.Name()
+		subjectId = strings.ToLower(structName) + "ID"
+	}
 }
