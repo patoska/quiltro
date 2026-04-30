@@ -1,49 +1,53 @@
 package quiltro
 
 import (
-	"log"
-	"fmt"
+	"net/http"
 	"strings"
+
 	"github.com/gin-gonic/gin"
 )
 
-func Authenticate() gin.HandlerFunc {
+// Authenticate validates the Bearer JWT in the Authorization header and stores
+// the subject ID in the Gin context under the configured SubjectKey.
+func (q *Quiltro) Authenticate() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.AbortWithStatusJSON(401, gin.H{"error": "missing token"})
+		header := c.GetHeader("Authorization")
+		if !strings.HasPrefix(header, "Bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing or malformed authorization header"})
 			return
 		}
 
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		id, err := parseJWT(tokenStr)
+		sub, err := q.parseToken(strings.TrimPrefix(header, "Bearer "))
 		if err != nil {
-			c.AbortWithStatusJSON(401, gin.H{"error": "invalid token"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
 
-		c.Set(subjectId, id)
+		c.Set(q.subjectKey, sub)
 		c.Next()
 	}
 }
 
-func Authorize(obj string, act string) gin.HandlerFunc {
+// Authorize checks the Casbin policy for the authenticated subject against the
+// given object and action. Must be chained after Authenticate.
+func (q *Quiltro) Authorize(obj, act string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id, exists := c.Get(subjectId)
+		sub, exists := c.Get(q.subjectKey)
 		if !exists {
-			c.AbortWithStatusJSON(403, "forbidden")
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthenticated"})
+			return
 		}
 
-		ok, err := Enforce(fmt.Sprintf("%d", id), obj, act)
+		ok, err := q.Enforce(sub.(string), obj, act)
 		if err != nil {
-			log.Println(err)
-			c.AbortWithStatusJSON(500, "error occurred when authorizing subject")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "authorization check failed"})
 			return
 		}
 		if !ok {
-			c.AbortWithStatusJSON(403, "forbidden")
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 			return
 		}
+
 		c.Next()
 	}
 }
