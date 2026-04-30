@@ -15,7 +15,7 @@ Quiltro is designed to be imported as a library. It handles token issuance, requ
 ## Installation
 
 ```sh
-go get github.com/patoska/quiltro
+go get github.com/patoska/quiltro/v2
 ```
 
 ## Quick start
@@ -44,7 +44,7 @@ m = (r.sub == p.sub || g(r.sub, p.sub)) && keyMatch(r.obj, p.obj) && keyMatch(r.
 ### 2. Initialize quiltro
 
 ```go
-import "github.com/patoska/quiltro"
+import "github.com/patoska/quiltro/v2"
 
 q, err := quiltro.New(quiltro.Config{
     DB:         db,                          // *gorm.DB

@@ -1,4 +1,4 @@
-module github.com/patoska/quiltro
+module github.com/patoska/quiltro/v2
 
 go 1.25.3
 
