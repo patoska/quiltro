@@ -106,14 +106,18 @@ q.RegisterRoutes(admin)
 
 This registers:
 
-| Method | Path             | Body                          | Description                  |
-|--------|------------------|-------------------------------|------------------------------|
-| GET    | /admin/policies  | —                             | List all permission rules    |
-| POST   | /admin/policies  | `{ sub, obj, act }`           | Add a permission rule        |
-| DELETE | /admin/policies  | `{ sub, obj, act }`           | Remove a permission rule     |
-| GET    | /admin/roles     | —                             | List all role assignments    |
-| POST   | /admin/roles     | `{ sub, role }`               | Assign a role to a subject   |
-| DELETE | /admin/roles     | `{ sub, role }`               | Remove a role from a subject |
+| Method | Path                  | Body                              | Description                  |
+|--------|-----------------------|------------------------------------|------------------------------|
+| GET    | /admin/policies       | —                                   | List all permission rules    |
+| POST   | /admin/policies       | `{ ptype, v0, v1, v2, v3, v4, v5 }` | Add a permission rule        |
+| GET    | /admin/policies/:id   | —                                   | Get a permission rule        |
+| PUT    | /admin/policies/:id   | `{ ptype, v0, v1, v2, v3, v4, v5 }` | Replace a permission rule    |
+| DELETE | /admin/policies/:id   | —                                   | Remove a permission rule     |
+| GET    | /admin/roles          | —                                   | List all role assignments    |
+| POST   | /admin/roles          | `{ sub, role }`                     | Assign a role to a subject   |
+| DELETE | /admin/roles          | `{ sub, role }`                     | Remove a role from a subject |
+
+`v0`..`v5` map to whatever `[policy_definition]` declares for that `ptype` in your loaded Casbin model (e.g. 3 fields for `p = sub, act, obj`, more for a richer ABAC-style definition). Only fields within that arity may be set — anything beyond it is rejected with `400`.
 
 ## API reference
 
@@ -147,6 +151,18 @@ q.RemoveRole(sub, role string) error
 q.GetRoles() ([][]string, error)
 q.GetRolesForSubject(sub string) ([]string, error)
 ```
+
+For row-level CRUD (the API the `/policies` HTTP routes above are built on), which works with any `[policy_definition]` arity instead of assuming `sub, act, obj`:
+
+```go
+q.ListPolicyRules() ([]PolicyRule, error)
+q.GetPolicyRule(id uint) (PolicyRule, error)
+q.CreatePolicyRule(ptype string, values [6]string) (PolicyRule, error)
+q.UpdatePolicyRule(id uint, ptype string, values [6]string) (PolicyRule, error)
+q.DeletePolicyRule(id uint) (int, error)
+```
+
+`PolicyRule` carries the row's `ID`, `Ptype`, and `V0`..`V5`. `values` fills `v0`..`v5` in order; only as many as the ptype's declared field count are used, and setting anything beyond that returns `ErrInvalidPolicyRule`.
 
 ## Subject identifiers
 
