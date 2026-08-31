@@ -28,7 +28,6 @@ type Quiltro struct {
 
 // New creates a Quiltro instance, initializing the Casbin enforcer backed by the given DB.
 func New(cfg Config) (*Quiltro, error) {
-	fmt.Println("Initializing Quiltro with config:", cfg)
 	if cfg.DB == nil {
 		return nil, fmt.Errorf("quiltro: DB is required")
 	}
