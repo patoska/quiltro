@@ -9,6 +9,8 @@ Quiltro is designed to be imported as a library. It handles token issuance, requ
 - JWT generation and validation (HS256, configurable expiry)
 - Casbin RBAC enforcement via Gin middleware
 - Login endpoint factory — bring your own user lookup
+- Pluggable OAuth 2.0 login (Google built in, any other provider via the same generic interface)
+- Password login can be disabled entirely, leaving OAuth as the only way in
 - Policy and role management endpoints (mountable on any router group)
 - Generic subject identifiers — works with numeric IDs, UUIDs, emails, or anything else
 
@@ -87,6 +89,95 @@ And responds with:
 { "token": "<jwt>" }
 ```
 
+### 3b. Add Google (or other) OAuth login
+
+Register providers by name in `Config.OAuthProviders`. `OAuthLoginHandler` and
+`OAuthCallbackHandler` are generic — they dispatch on the `:provider` URL
+param, so any provider registered this way works without new handler code.
+Google is provided out of the box; other providers plug in the same way by
+supplying an `oauth2.Config` and a `FetchProfile` function.
+
+```go
+q, err := quiltro.New(quiltro.Config{
+    DB:         db,
+    CasbinConf: "path/to/model.conf",
+    JWTSecret:  []byte(os.Getenv("JWT_SECRET")),
+
+    OAuthStateSecret: []byte(os.Getenv("OAUTH_STATE_SECRET")), // signs the CSRF state param
+    OAuthProviders: map[string]quiltro.OAuthProvider{
+        "google": quiltro.GoogleProvider(
+            os.Getenv("GOOGLE_CLIENT_ID"),
+            os.Getenv("GOOGLE_CLIENT_SECRET"),
+            os.Getenv("GOOGLE_REDIRECT_URL"),
+        ),
+    },
+
+    // Optional: how OAuthCallbackHandler delivers the token. Defaults to "json".
+    OAuthResponseMode: quiltro.OAuthResponseMode(os.Getenv("OAUTH_RESPONSE_MODE")),
+    OAuthRedirectURL:  os.Getenv("OAUTH_REDIRECT_URL"), // required for "redirect"/"cookie" modes
+})
+
+r.GET("/auth/:provider/login", q.OAuthLoginHandler())
+r.GET("/auth/:provider/callback", q.OAuthCallbackHandler(func(ctx context.Context, profile quiltro.OAuthProfile) (string, error) {
+    user, err := userRepo.FindOrCreateByOAuth(ctx, profile.ProviderID, profile.Subject, profile.Email)
+    if err != nil {
+        return "", err
+    }
+    return strconv.Itoa(int(user.ID)), nil
+}))
+```
+
+This opens `GET /auth/google/login` (redirects to Google's consent screen) and
+`GET /auth/google/callback` (completes the exchange and issues a JWT).
+
+`OAuthResponseMode` controls how the callback hands back the token, so the
+same backend can serve different frontend shapes:
+
+| Mode       | Behavior                                                              |
+|------------|-------------------------------------------------------------------------|
+| `json`     | (default) `200 { "token": "<jwt>" }` — for a popup/webview flow that reads the response directly |
+| `redirect` | `302` to `OAuthRedirectURL` with `?token=<jwt>` appended               |
+| `cookie`   | Sets an httpOnly cookie (`OAuthCookieName`, default `quiltro_token`) and `302`s to `OAuthRedirectURL` with no token in the URL |
+
+#### Disabling password login
+
+Set `DisablePasswordLogin: true` to make `LoginHandler` reject every request
+with `403`, so only OAuth login works — even if an app still wires the
+`/login` route by mistake. Requires at least one entry in `OAuthProviders`.
+
+```go
+q, err := quiltro.New(quiltro.Config{
+    // ...
+    DisablePasswordLogin: os.Getenv("DISABLE_PASSWORD_LOGIN") == "true",
+})
+```
+
+Leave it `false` (the default) to allow both password and OAuth login side by side.
+
+#### Environment variables
+
+Quiltro itself never reads `.env` files or calls `os.Getenv` — it only
+consumes whatever values the app passes into `Config`. These are the
+variables a Go app typically defines in its own `.env.example` to wire up
+Google OAuth:
+
+```sh
+# JWT
+JWT_SECRET=
+
+# Google OAuth
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URL=          # e.g. https://api.example.com/auth/google/callback
+
+# quiltro OAuth flow
+OAUTH_STATE_SECRET=           # random 32+ byte value; signs the CSRF state param
+OAUTH_RESPONSE_MODE=json      # json | redirect | cookie
+OAUTH_REDIRECT_URL=           # frontend URL; required if OAUTH_RESPONSE_MODE is redirect or cookie
+OAUTH_COOKIE_NAME=            # optional, only used in cookie mode; defaults to quiltro_token
+DISABLE_PASSWORD_LOGIN=false
+```
+
 ### 4. Protect routes
 
 ```go
@@ -123,7 +214,32 @@ This registers:
 
 ### `quiltro.New(cfg Config) (*Quiltro, error)`
 
-Initializes the enforcer and validates configuration. Returns an error if `DB`, `JWTSecret`, or `CasbinConf` are missing.
+Initializes the enforcer and validates configuration. Returns an error if `DB`, `JWTSecret`, or `CasbinConf` are missing, if `OAuthProviders` is set without `OAuthStateSecret`, if `DisablePasswordLogin` is set without an `OAuthProvider`, or if `OAuthResponseMode` is `redirect`/`cookie` without `OAuthRedirectURL`.
+
+### OAuth login
+
+```go
+type OAuthProfile struct {
+    ProviderID    string // provider key, e.g. "google"
+    Subject       string // provider's stable user id
+    Email         string
+    EmailVerified bool
+    Name          string
+    Picture       string
+}
+
+type OAuthLookupFunc func(ctx context.Context, profile OAuthProfile) (subjectID string, err error)
+
+type OAuthProvider struct {
+    Config       oauth2.Config
+    FetchProfile func(ctx context.Context, token *oauth2.Token) (OAuthProfile, error)
+}
+
+q.OAuthLoginHandler() gin.HandlerFunc                        // GET /auth/:provider/login
+q.OAuthCallbackHandler(lookup OAuthLookupFunc) gin.HandlerFunc // GET /auth/:provider/callback
+
+quiltro.GoogleProvider(clientID, clientSecret, redirectURL string, scopes ...string) OAuthProvider
+```
 
 ### Middleware
 
