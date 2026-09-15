@@ -29,6 +29,11 @@ type LoginResponse struct {
 // the provided LookupFunc and responds with a signed JWT on success.
 func (q *Quiltro) LoginHandler(lookup LookupFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if q.disablePasswordLogin {
+			c.JSON(http.StatusForbidden, gin.H{"error": "password login is disabled"})
+			return
+		}
+
 		var req LoginRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

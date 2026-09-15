@@ -28,9 +28,14 @@ func (q *Quiltro) Authenticate() gin.HandlerFunc {
 	}
 }
 
-// Authorize checks the Casbin policy for the authenticated subject against the
-// given object and action. Must be chained after Authenticate.
-func (q *Quiltro) Authorize(obj, act string) gin.HandlerFunc {
+// Authorize enforces the casbin policy for the authenticated subject,
+// calling Enforce(sub, rvals...). rvals are whatever the loaded model's
+// request definition expects after sub - (obj, act) for plain ACL/RBAC,
+// (domain, obj, act) for RBAC with domains, etc. Must be chained after
+// Authenticate. For models Authorize can't express - no subject at all
+// (ACL without users), a domain sourced from the request, or struct-typed
+// ABAC/PBAC attributes - use AuthorizeFunc instead.
+func (q *Quiltro) Authorize(rvals ...interface{}) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sub, exists := c.Get(q.subjectKey)
 		if !exists {
@@ -38,7 +43,7 @@ func (q *Quiltro) Authorize(obj, act string) gin.HandlerFunc {
 			return
 		}
 
-		ok, err := q.Enforce(sub.(string), obj, act)
+		ok, err := q.Enforce(append([]interface{}{sub}, rvals...)...)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "authorization check failed"})
 			return
@@ -50,4 +55,43 @@ func (q *Quiltro) Authorize(obj, act string) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// AuthorizeFunc builds the full Enforce request tuple per request via build,
+// for casbin models Authorize's "subject-first, static tail" shape can't
+// express: no subject (ACL without users), a domain read from the request
+// (e.g. a :tenant path param), or ABAC/PBAC matchers needing a struct
+// resolved per request (e.g. a resource's owner looked up from the DB).
+// build's own errors (validation, lookup failures) are reported as 400.
+func (q *Quiltro) AuthorizeFunc(build func(c *gin.Context) ([]interface{}, error)) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rvals, err := build(c)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		ok, err := q.Enforce(rvals...)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "authorization check failed"})
+			return
+		}
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// Subject returns the authenticated subject stored by Authenticate, if any.
+// Use it inside an AuthorizeFunc builder that needs the subject alongside
+// other per-request values.
+func (q *Quiltro) Subject(c *gin.Context) (string, bool) {
+	sub, exists := c.Get(q.subjectKey)
+	if !exists {
+		return "", false
+	}
+	return sub.(string), true
 }

@@ -9,10 +9,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// ErrInvalidPolicyRule indicates a request's ptype or values don't match
-// what the loaded casbin model declares (unknown ptype, or wrong number of
-// v0..v5 fields for it).
-var ErrInvalidPolicyRule = errors.New("invalid policy rule")
+// ErrInvalidRule indicates a request's ptype or values don't match what the
+// loaded casbin model declares (unknown ptype, or wrong number of v0..v5
+// fields for it).
+var ErrInvalidRule = errors.New("invalid rule")
 
 // casbinRuleRow mirrors gorm-adapter's casbin_rule table, giving direct
 // access to the row id that casbin's own policy API does not expose.
@@ -29,8 +29,8 @@ type casbinRuleRow struct {
 
 func (casbinRuleRow) TableName() string { return "casbin_rule" }
 
-func (r casbinRuleRow) toPolicyRule() PolicyRule {
-	return PolicyRule(r)
+func (r casbinRuleRow) toRule() Rule {
+	return Rule(r)
 }
 
 func (q *Quiltro) initCasbin(confPath string) error {
@@ -52,33 +52,55 @@ func (q *Quiltro) initCasbin(confPath string) error {
 	return nil
 }
 
-// Enforce checks whether a subject can perform an action on an object.
-func (q *Quiltro) Enforce(sub, obj, act string) (bool, error) {
-	return q.enforcer.Enforce(sub, obj, act)
+// Enforce checks whether a request is allowed under the loaded casbin model.
+// rvals must match the model's [request_definition] arity and order - (sub,
+// obj, act) for plain ACL/RBAC, (sub, dom, obj, act) for RBAC with domains,
+// (obj, act) for ACL without users, or any other shape the loaded model
+// declares.
+func (q *Quiltro) Enforce(rvals ...interface{}) (bool, error) {
+	return q.enforcer.Enforce(rvals...)
 }
 
-// AddPolicy adds a permission rule: subject may perform action on object.
-func (q *Quiltro) AddPolicy(sub, obj, act string) error {
-	_, err := q.enforcer.AddPolicy(sub, obj, act)
+// AddPolicy adds a permission rule. params must match the model's "p"
+// [policy_definition] arity and order.
+func (q *Quiltro) AddPolicy(params ...interface{}) error {
+	_, err := q.enforcer.AddPolicy(params...)
 	return err
 }
 
 // RemovePolicy removes a permission rule.
-func (q *Quiltro) RemovePolicy(sub, obj, act string) error {
-	_, err := q.enforcer.RemovePolicy(sub, obj, act)
+func (q *Quiltro) RemovePolicy(params ...interface{}) error {
+	_, err := q.enforcer.RemovePolicy(params...)
 	return err
 }
 
-// AddRole assigns a role to a subject.
-func (q *Quiltro) AddRole(sub, role string) error {
-	_, err := q.enforcer.AddGroupingPolicy(sub, role)
+// AddRole adds a "g" grouping row - a role assignment for plain RBAC
+// (sub, role), or a role assignment scoped to a domain/tenant (sub, role,
+// domain) under RBAC with domains.
+func (q *Quiltro) AddRole(params ...interface{}) error {
+	_, err := q.enforcer.AddGroupingPolicy(params...)
 	return err
 }
 
-// RemoveRole removes a role assignment from a subject.
-func (q *Quiltro) RemoveRole(sub, role string) error {
-	_, err := q.enforcer.RemoveGroupingPolicy(sub, role)
+// RemoveRole removes a "g" grouping row added via AddRole.
+func (q *Quiltro) RemoveRole(params ...interface{}) error {
+	_, err := q.enforcer.RemoveGroupingPolicy(params...)
 	return err
+}
+
+// ReloadModel re-reads the casbin model definition from the CasbinConf path
+// given to New, then reloads policy rules against it (policy is invalidated
+// by a model change). Call this after editing the model file on disk - e.g.
+// switching from ACL to RBAC with domains - to pick up the change without
+// restarting the app.
+func (q *Quiltro) ReloadModel() error {
+	if err := q.enforcer.LoadModel(); err != nil {
+		return fmt.Errorf("reload model: %w", err)
+	}
+	if err := q.enforcer.LoadPolicy(); err != nil {
+		return fmt.Errorf("reload policy: %w", err)
+	}
+	return nil
 }
 
 // GetPolicies returns all permission rules.
@@ -86,44 +108,53 @@ func (q *Quiltro) GetPolicies() ([][]string, error) {
 	return q.enforcer.GetPolicy()
 }
 
-// policyTypes returns the set of ptype names declared under the model's
-// [policy_definition] section (e.g. "p", or "p", "p2" for a model with
-// multiple policy shapes). Rows with any other ptype (grouping/"g" rows)
-// are outside this API's domain.
-func (q *Quiltro) policyTypes() map[string]bool {
+// declaredPTypes returns the set of ptype names declared anywhere in the
+// loaded casbin model's "p" (policy) or "g" (role/grouping) sections (e.g.
+// "p", "p2", "g", "g2"). These are the only sections whose rows are stored
+// in casbin_rule, so together they define every ptype this API will accept
+// - RBAC, ABAC, or any other model shape casbin supports.
+func (q *Quiltro) declaredPTypes() map[string]bool {
 	types := map[string]bool{}
 	for ptype := range q.enforcer.GetModel()["p"] {
+		types[ptype] = true
+	}
+	for ptype := range q.enforcer.GetModel()["g"] {
 		types[ptype] = true
 	}
 	return types
 }
 
-// policyFieldCount returns how many v0..v5 fields the given ptype is
-// declared with in the loaded casbin model (e.g. 3 for "p = sub, act, obj",
-// or up to 6 for a richer ABAC-style definition), so Quiltro adapts to any
-// config instead of assuming a fixed arity.
-func (q *Quiltro) policyFieldCount(ptype string) (int, bool) {
-	assertion, ok := q.enforcer.GetModel()["p"][ptype]
-	if !ok {
-		return 0, false
+// ruleArity returns how many v0..v5 fields the given ptype is declared with
+// in the loaded casbin model (e.g. 3 for "p = sub, act, obj", 2 for
+// "g = _, _"), and which section ("p" or "g") declared it - the latter
+// determines whether creating a row goes through AddNamedPolicy or
+// AddNamedGroupingPolicy. Quiltro adapts to whatever the loaded model
+// declares instead of assuming a fixed arity or a policy-only domain.
+func (q *Quiltro) ruleArity(ptype string) (count int, section string, ok bool) {
+	if assertion, exists := q.enforcer.GetModel()["p"][ptype]; exists {
+		return len(assertion.Tokens), "p", true
 	}
-	return len(assertion.Tokens), true
+	if assertion, exists := q.enforcer.GetModel()["g"][ptype]; exists {
+		return len(assertion.Tokens), "g", true
+	}
+	return 0, "", false
 }
 
-// resolvePolicyValues validates values (v0..v5, some possibly unset) against
-// ptype's declared field count and trims it to that length. It errors if
-// ptype is unknown or if a value is set beyond what ptype declares.
-func (q *Quiltro) resolvePolicyValues(ptype string, values [6]string) ([]string, error) {
-	fieldCount, ok := q.policyFieldCount(ptype)
+// resolveRuleValues validates values (v0..v5, some possibly unset) against
+// ptype's declared field count and trims it to that length, also reporting
+// which model section ptype belongs to. It errors if ptype is unknown or if
+// a value is set beyond what ptype declares.
+func (q *Quiltro) resolveRuleValues(ptype string, values [6]string) (fields []string, section string, err error) {
+	fieldCount, section, ok := q.ruleArity(ptype)
 	if !ok {
-		return nil, fmt.Errorf("%w: unknown policy type %q", ErrInvalidPolicyRule, ptype)
+		return nil, "", fmt.Errorf("%w: unknown rule type %q", ErrInvalidRule, ptype)
 	}
 	for i := fieldCount; i < len(values); i++ {
 		if values[i] != "" {
-			return nil, fmt.Errorf("%w: policy type %q only supports %d fields (v0..v%d)", ErrInvalidPolicyRule, ptype, fieldCount, fieldCount-1)
+			return nil, "", fmt.Errorf("%w: rule type %q only supports %d fields (v0..v%d)", ErrInvalidRule, ptype, fieldCount, fieldCount-1)
 		}
 	}
-	return values[:fieldCount], nil
+	return values[:fieldCount], section, nil
 }
 
 func toAnySlice(values []string) []interface{} {
@@ -150,12 +181,12 @@ func (q *Quiltro) findRuleRow(ptype string, values []string) (casbinRuleRow, err
 	return row, err
 }
 
-// ListPolicyRules returns all rows whose ptype is a declared policy type,
-// together with their casbin_rule row id.
-func (q *Quiltro) ListPolicyRules() ([]PolicyRule, error) {
-	types := q.policyTypes()
+// ListRules returns all rows whose ptype is declared in the loaded model
+// (either its "p" or "g" section), together with their casbin_rule row id.
+func (q *Quiltro) ListRules() ([]Rule, error) {
+	types := q.declaredPTypes()
 	if len(types) == 0 {
-		return []PolicyRule{}, nil
+		return []Rule{}, nil
 	}
 	ptypes := make([]string, 0, len(types))
 	for ptype := range types {
@@ -165,57 +196,65 @@ func (q *Quiltro) ListPolicyRules() ([]PolicyRule, error) {
 	if err := q.db.Where("ptype IN ?", ptypes).Order("id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	rules := make([]PolicyRule, len(rows))
+	rules := make([]Rule, len(rows))
 	for i, row := range rows {
-		rules[i] = row.toPolicyRule()
+		rules[i] = row.toRule()
 	}
 	return rules, nil
 }
 
-// GetPolicyRule returns the permission rule with the given casbin_rule row id.
-func (q *Quiltro) GetPolicyRule(id uint) (PolicyRule, error) {
+// GetRule returns the rule with the given casbin_rule row id.
+func (q *Quiltro) GetRule(id uint) (Rule, error) {
 	var row casbinRuleRow
 	if err := q.db.Where("id = ?", id).First(&row).Error; err != nil {
-		return PolicyRule{}, err
+		return Rule{}, err
 	}
-	if !q.policyTypes()[row.Ptype] {
-		return PolicyRule{}, gorm.ErrRecordNotFound
+	if !q.declaredPTypes()[row.Ptype] {
+		return Rule{}, gorm.ErrRecordNotFound
 	}
-	return row.toPolicyRule(), nil
+	return row.toRule(), nil
 }
 
-// CreatePolicyRule adds a new rule of the given ptype and returns it with
-// its assigned row id. values holds v0..v5 (trailing entries may be "" for
-// ptypes with fewer fields than 6).
-func (q *Quiltro) CreatePolicyRule(ptype string, values [6]string) (PolicyRule, error) {
-	fields, err := q.resolvePolicyValues(ptype, values)
+// CreateRule adds a new rule of the given ptype and returns it with its
+// assigned row id. values holds v0..v5 (trailing entries may be "" for
+// ptypes with fewer fields than 6). It routes through AddNamedPolicy or
+// AddNamedGroupingPolicy depending on whether ptype belongs to the model's
+// "p" or "g" section, so both permission rules and role/grouping rows are
+// created correctly and the enforcer's in-memory state stays in sync.
+func (q *Quiltro) CreateRule(ptype string, values [6]string) (Rule, error) {
+	fields, section, err := q.resolveRuleValues(ptype, values)
 	if err != nil {
-		return PolicyRule{}, err
+		return Rule{}, err
 	}
-	if _, err := q.enforcer.AddNamedPolicy(ptype, toAnySlice(fields)...); err != nil {
-		return PolicyRule{}, err
+	if section == "g" {
+		_, err = q.enforcer.AddNamedGroupingPolicy(ptype, toAnySlice(fields)...)
+	} else {
+		_, err = q.enforcer.AddNamedPolicy(ptype, toAnySlice(fields)...)
+	}
+	if err != nil {
+		return Rule{}, err
 	}
 	row, err := q.findRuleRow(ptype, fields)
 	if err != nil {
-		return PolicyRule{}, err
+		return Rule{}, err
 	}
-	return row.toPolicyRule(), nil
+	return row.toRule(), nil
 }
 
-// UpdatePolicyRule replaces the ptype and values of the rule at id in place,
-// then reloads the enforcer so its in-memory model stays in sync with the DB.
-func (q *Quiltro) UpdatePolicyRule(id uint, ptype string, values [6]string) (PolicyRule, error) {
+// UpdateRule replaces the ptype and values of the rule at id in place, then
+// reloads the enforcer so its in-memory model stays in sync with the DB.
+func (q *Quiltro) UpdateRule(id uint, ptype string, values [6]string) (Rule, error) {
 	var existing casbinRuleRow
 	if err := q.db.Where("id = ?", id).First(&existing).Error; err != nil {
-		return PolicyRule{}, err
+		return Rule{}, err
 	}
-	if !q.policyTypes()[existing.Ptype] {
-		return PolicyRule{}, gorm.ErrRecordNotFound
+	if !q.declaredPTypes()[existing.Ptype] {
+		return Rule{}, gorm.ErrRecordNotFound
 	}
 
-	fields, err := q.resolvePolicyValues(ptype, values)
+	fields, _, err := q.resolveRuleValues(ptype, values)
 	if err != nil {
-		return PolicyRule{}, err
+		return Rule{}, err
 	}
 	var padded [6]string
 	copy(padded[:], fields)
@@ -226,24 +265,24 @@ func (q *Quiltro) UpdatePolicyRule(id uint, ptype string, values [6]string) (Pol
 		"v3": padded[3], "v4": padded[4], "v5": padded[5],
 	})
 	if result.Error != nil {
-		return PolicyRule{}, result.Error
+		return Rule{}, result.Error
 	}
 	if result.RowsAffected == 0 {
-		return PolicyRule{}, gorm.ErrRecordNotFound
+		return Rule{}, gorm.ErrRecordNotFound
 	}
 	if err := q.enforcer.LoadPolicy(); err != nil {
-		return PolicyRule{}, err
+		return Rule{}, err
 	}
-	return PolicyRule{
+	return Rule{
 		ID: id, Ptype: ptype,
 		V0: padded[0], V1: padded[1], V2: padded[2],
 		V3: padded[3], V4: padded[4], V5: padded[5],
 	}, nil
 }
 
-// DeletePolicyRule removes the rule at id (if its ptype is a declared policy
-// type) and reports how many rows were removed.
-func (q *Quiltro) DeletePolicyRule(id uint) (int, error) {
+// DeleteRule removes the rule at id (if its ptype is declared in the loaded
+// model) and reports how many rows were removed.
+func (q *Quiltro) DeleteRule(id uint) (int, error) {
 	var row casbinRuleRow
 	if err := q.db.Where("id = ?", id).First(&row).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -251,7 +290,7 @@ func (q *Quiltro) DeletePolicyRule(id uint) (int, error) {
 		}
 		return 0, err
 	}
-	if !q.policyTypes()[row.Ptype] {
+	if !q.declaredPTypes()[row.Ptype] {
 		return 0, nil
 	}
 
@@ -268,8 +307,10 @@ func (q *Quiltro) DeletePolicyRule(id uint) (int, error) {
 }
 
 // GetPoliciesForSubject returns permission rules for the given subject.
-func (q *Quiltro) GetPoliciesForSubject(sub string) ([][]string, error) {
-	return q.enforcer.GetFilteredPolicy(0, sub)
+// fieldValues, if given, further filters on the fields immediately after
+// sub - e.g. a domain under RBAC with domains.
+func (q *Quiltro) GetPoliciesForSubject(sub string, fieldValues ...string) ([][]string, error) {
+	return q.enforcer.GetFilteredPolicy(0, append([]string{sub}, fieldValues...)...)
 }
 
 // GetRoles returns all role assignments.
@@ -277,7 +318,8 @@ func (q *Quiltro) GetRoles() ([][]string, error) {
 	return q.enforcer.GetGroupingPolicy()
 }
 
-// GetRolesForSubject returns roles assigned to the given subject.
-func (q *Quiltro) GetRolesForSubject(sub string) ([]string, error) {
-	return q.enforcer.GetRolesForUser(sub)
+// GetRolesForSubject returns roles assigned to the given subject. domain is
+// required under RBAC with domains and ignored otherwise.
+func (q *Quiltro) GetRolesForSubject(sub string, domain ...string) ([]string, error) {
+	return q.enforcer.GetRolesForUser(sub, domain...)
 }

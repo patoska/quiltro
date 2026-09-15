@@ -8,10 +8,12 @@ require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/glebarez/sqlite v1.7.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
+	golang.org/x/oauth2 v0.24.0
 	gorm.io/gorm v1.31.0
 )
 
 require (
+	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/bmatcuk/doublestar/v4 v4.6.1 // indirect
 	github.com/bytedance/sonic v1.14.0 // indirect
 	github.com/bytedance/sonic/loader v0.3.0 // indirect
