@@ -52,33 +52,55 @@ func (q *Quiltro) initCasbin(confPath string) error {
 	return nil
 }
 
-// Enforce checks whether a subject can perform an action on an object.
-func (q *Quiltro) Enforce(sub, obj, act string) (bool, error) {
-	return q.enforcer.Enforce(sub, obj, act)
+// Enforce checks whether a request is allowed under the loaded casbin model.
+// rvals must match the model's [request_definition] arity and order - (sub,
+// obj, act) for plain ACL/RBAC, (sub, dom, obj, act) for RBAC with domains,
+// (obj, act) for ACL without users, or any other shape the loaded model
+// declares.
+func (q *Quiltro) Enforce(rvals ...interface{}) (bool, error) {
+	return q.enforcer.Enforce(rvals...)
 }
 
-// AddPolicy adds a permission rule: subject may perform action on object.
-func (q *Quiltro) AddPolicy(sub, obj, act string) error {
-	_, err := q.enforcer.AddPolicy(sub, obj, act)
+// AddPolicy adds a permission rule. params must match the model's "p"
+// [policy_definition] arity and order.
+func (q *Quiltro) AddPolicy(params ...interface{}) error {
+	_, err := q.enforcer.AddPolicy(params...)
 	return err
 }
 
 // RemovePolicy removes a permission rule.
-func (q *Quiltro) RemovePolicy(sub, obj, act string) error {
-	_, err := q.enforcer.RemovePolicy(sub, obj, act)
+func (q *Quiltro) RemovePolicy(params ...interface{}) error {
+	_, err := q.enforcer.RemovePolicy(params...)
 	return err
 }
 
-// AddRole assigns a role to a subject.
-func (q *Quiltro) AddRole(sub, role string) error {
-	_, err := q.enforcer.AddGroupingPolicy(sub, role)
+// AddRole adds a "g" grouping row - a role assignment for plain RBAC
+// (sub, role), or a role assignment scoped to a domain/tenant (sub, role,
+// domain) under RBAC with domains.
+func (q *Quiltro) AddRole(params ...interface{}) error {
+	_, err := q.enforcer.AddGroupingPolicy(params...)
 	return err
 }
 
-// RemoveRole removes a role assignment from a subject.
-func (q *Quiltro) RemoveRole(sub, role string) error {
-	_, err := q.enforcer.RemoveGroupingPolicy(sub, role)
+// RemoveRole removes a "g" grouping row added via AddRole.
+func (q *Quiltro) RemoveRole(params ...interface{}) error {
+	_, err := q.enforcer.RemoveGroupingPolicy(params...)
 	return err
+}
+
+// ReloadModel re-reads the casbin model definition from the CasbinConf path
+// given to New, then reloads policy rules against it (policy is invalidated
+// by a model change). Call this after editing the model file on disk - e.g.
+// switching from ACL to RBAC with domains - to pick up the change without
+// restarting the app.
+func (q *Quiltro) ReloadModel() error {
+	if err := q.enforcer.LoadModel(); err != nil {
+		return fmt.Errorf("reload model: %w", err)
+	}
+	if err := q.enforcer.LoadPolicy(); err != nil {
+		return fmt.Errorf("reload policy: %w", err)
+	}
+	return nil
 }
 
 // GetPolicies returns all permission rules.
@@ -285,8 +307,10 @@ func (q *Quiltro) DeleteRule(id uint) (int, error) {
 }
 
 // GetPoliciesForSubject returns permission rules for the given subject.
-func (q *Quiltro) GetPoliciesForSubject(sub string) ([][]string, error) {
-	return q.enforcer.GetFilteredPolicy(0, sub)
+// fieldValues, if given, further filters on the fields immediately after
+// sub - e.g. a domain under RBAC with domains.
+func (q *Quiltro) GetPoliciesForSubject(sub string, fieldValues ...string) ([][]string, error) {
+	return q.enforcer.GetFilteredPolicy(0, append([]string{sub}, fieldValues...)...)
 }
 
 // GetRoles returns all role assignments.
@@ -294,7 +318,8 @@ func (q *Quiltro) GetRoles() ([][]string, error) {
 	return q.enforcer.GetGroupingPolicy()
 }
 
-// GetRolesForSubject returns roles assigned to the given subject.
-func (q *Quiltro) GetRolesForSubject(sub string) ([]string, error) {
-	return q.enforcer.GetRolesForUser(sub)
+// GetRolesForSubject returns roles assigned to the given subject. domain is
+// required under RBAC with domains and ignored otherwise.
+func (q *Quiltro) GetRolesForSubject(sub string, domain ...string) ([]string, error) {
+	return q.enforcer.GetRolesForUser(sub, domain...)
 }

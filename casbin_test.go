@@ -2,6 +2,7 @@ package quiltro
 
 import (
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -252,5 +253,190 @@ func TestRuleCRUDHandlesRoleRows(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected bob to lose admin's policy after DeleteRule(g)")
+	}
+}
+
+// TestEnforceSupportsDomainModel proves Enforce, AddPolicy, AddRole, and
+// GetRolesForSubject work under RBAC with domains/tenants, whose request and
+// role definitions carry a domain field the classic sub/obj/act API can't
+// express.
+func TestEnforceSupportsDomainModel(t *testing.T) {
+	const domainConf = `
+[request_definition]
+r = sub, dom, obj, act
+
+[policy_definition]
+p = sub, dom, obj, act
+
+[role_definition]
+g = _, _, _
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = g(r.sub, p.sub, r.dom) && r.dom == p.dom && r.obj == p.obj && r.act == p.act
+`
+	q, err := New(Config{
+		DB:         newTestDB(t),
+		CasbinConf: writeConf(t, domainConf),
+		JWTSecret:  []byte("test-secret"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := q.AddPolicy("admin", "tenant1", "/docs", "read"); err != nil {
+		t.Fatalf("AddPolicy: %v", err)
+	}
+	if err := q.AddRole("alice", "admin", "tenant1"); err != nil {
+		t.Fatalf("AddRole: %v", err)
+	}
+
+	ok, err := q.Enforce("alice", "tenant1", "/docs", "read")
+	if err != nil {
+		t.Fatalf("Enforce: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected alice to be allowed in tenant1 via the admin role")
+	}
+
+	ok, err = q.Enforce("alice", "tenant2", "/docs", "read")
+	if err != nil {
+		t.Fatalf("Enforce: %v", err)
+	}
+	if ok {
+		t.Fatal("expected alice to be denied in tenant2, a different domain")
+	}
+
+	roles, err := q.GetRolesForSubject("alice", "tenant1")
+	if err != nil {
+		t.Fatalf("GetRolesForSubject: %v", err)
+	}
+	if len(roles) != 1 || roles[0] != "admin" {
+		t.Fatalf("GetRolesForSubject = %v, want [admin]", roles)
+	}
+}
+
+// TestEnforceSupportsACLWithoutUsers proves Enforce and AddPolicy work under
+// a model with no subject concept at all - useful for systems without
+// authentication.
+func TestEnforceSupportsACLWithoutUsers(t *testing.T) {
+	const noUserConf = `
+[request_definition]
+r = obj, act
+
+[policy_definition]
+p = obj, act
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = r.obj == p.obj && r.act == p.act
+`
+	q, err := New(Config{
+		DB:         newTestDB(t),
+		CasbinConf: writeConf(t, noUserConf),
+		JWTSecret:  []byte("test-secret"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ok, err := q.Enforce("/docs", "read")
+	if err != nil {
+		t.Fatalf("Enforce: %v", err)
+	}
+	if ok {
+		t.Fatal("expected deny before any policy exists")
+	}
+
+	if err := q.AddPolicy("/docs", "read"); err != nil {
+		t.Fatalf("AddPolicy: %v", err)
+	}
+
+	ok, err = q.Enforce("/docs", "read")
+	if err != nil {
+		t.Fatalf("Enforce: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected allow after adding a matching policy")
+	}
+}
+
+// TestReloadModelPicksUpModelChange proves ReloadModel re-reads the model
+// file from disk and reloads existing rows against the new shape, so a
+// model change - here, switching a plain ACL model to RBAC by adding a
+// [role_definition] and a matcher clause for it - takes effect without
+// restarting the app. The "p" arity is unchanged across the edit, since
+// casbin's adapter requires an exact field-count match against the model
+// currently in effect and would otherwise refuse to reload existing rows.
+func TestReloadModelPicksUpModelChange(t *testing.T) {
+	const aclConf = `
+[request_definition]
+r = sub, obj, act
+
+[policy_definition]
+p = sub, obj, act
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = r.sub == p.sub && r.obj == p.obj && r.act == p.act
+`
+	confPath := writeConf(t, aclConf)
+	q, err := New(Config{
+		DB:         newTestDB(t),
+		CasbinConf: confPath,
+		JWTSecret:  []byte("test-secret"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := q.AddPolicy("alice", "/docs", "read"); err != nil {
+		t.Fatalf("AddPolicy: %v", err)
+	}
+	ok, err := q.Enforce("alice", "/docs", "read")
+	if err != nil {
+		t.Fatalf("Enforce: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected allow under the original ACL model")
+	}
+	ok, err = q.Enforce("bob", "/docs", "read")
+	if err != nil {
+		t.Fatalf("Enforce: %v", err)
+	}
+	if ok {
+		t.Fatal("expected deny for bob under the original ACL model, which has no role support")
+	}
+
+	if err := os.WriteFile(confPath, []byte(testCasbinConf), 0o600); err != nil {
+		t.Fatalf("overwrite conf: %v", err)
+	}
+	if err := q.ReloadModel(); err != nil {
+		t.Fatalf("ReloadModel: %v", err)
+	}
+
+	ok, err = q.Enforce("alice", "/docs", "read")
+	if err != nil {
+		t.Fatalf("Enforce: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected alice's pre-existing policy to still hold after reloading to the RBAC model")
+	}
+
+	if _, err := q.CreateRule("g", [6]string{"bob", "alice"}); err != nil {
+		t.Fatalf("CreateRule(g): %v", err)
+	}
+	ok, err = q.Enforce("bob", "/docs", "read")
+	if err != nil {
+		t.Fatalf("Enforce: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected bob to inherit alice's policy via a role only usable after the RBAC reload")
 	}
 }
